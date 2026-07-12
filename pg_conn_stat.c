@@ -242,9 +242,21 @@ pgcs_client_authentication(Port *port, int status)
 
 	LWLockRelease(pgcs->lock);
 
-	/* Only track disconnection for sessions that actually authenticated. */
+	/*
+	 * Only track disconnection for sessions that actually authenticated.
+	 *
+	 * Use before_shmem_exit(), not on_proc_exit(): ProcKill() (which sets
+	 * MyProc = NULL) is itself registered via on_shmem_exit(), and
+	 * shmem_exit() runs the before_shmem_exit list before the
+	 * on_shmem_exit list, while proc_exit_prepare() only runs the
+	 * on_proc_exit list after shmem_exit() has already completed. By the
+	 * time an on_proc_exit callback runs, MyProc is NULL, and
+	 * LWLockAcquire() cannot block on it, so it panics with "cannot wait
+	 * without a PGPROC structure" whenever the lock happens to be
+	 * contended at disconnect time.
+	 */
 	if (status == STATUS_OK)
-		on_proc_exit(pgcs_on_disconnect, (Datum) 0);
+		before_shmem_exit(pgcs_on_disconnect, (Datum) 0);
 }
 
 static void
