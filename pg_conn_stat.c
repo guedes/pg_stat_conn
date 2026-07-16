@@ -9,6 +9,16 @@
  * src/backend/utils/init/postinit.c, PerformAuthentication() at line 948
  * vs. MyDatabaseId assignment at line 1167), and failed-authentication
  * attempts may not even correspond to a real database/role.
+ *
+ * Locking follows pg_stat_statements' two-phase pattern rather than a
+ * single table-wide exclusive lock: the common case (the (database, user)
+ * pair has already been seen) only takes pgcs->lock in LW_SHARED mode to
+ * find the entry, then bumps its counters with atomic ops. LW_SHARED
+ * allows many backends in at once, and it's enough to keep the entry from
+ * being HASH_REMOVE'd (by a concurrent reset) out from under the atomic
+ * update, since removal requires LW_EXCLUSIVE and that can't be granted
+ * while any shared holder is in. LW_EXCLUSIVE is only needed once per
+ * distinct (database, user) pair, to insert it the first time.
  */
 #include "postgres.h"
 
@@ -16,6 +26,7 @@
 #include "funcapi.h"
 #include "libpq/auth.h"
 #include "miscadmin.h"
+#include "port/atomics.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
@@ -52,11 +63,11 @@ typedef struct PgConnStatKey
 typedef struct PgConnStatEntry
 {
 	PgConnStatKey key;			/* must be first, HASH_BLOBS compares raw bytes */
-	int64		n_connections;
-	int64		n_disconnections;
-	int64		n_auth_failures;
-	TimestampTz last_connection_time;		/* 0 = never */
-	TimestampTz last_disconnection_time;	/* 0 = never */
+	pg_atomic_uint64 n_connections;
+	pg_atomic_uint64 n_disconnections;
+	pg_atomic_uint64 n_auth_failures;
+	pg_atomic_uint64 last_connection_time;		/* TimestampTz bits; 0 = never */
+	pg_atomic_uint64 last_disconnection_time;	/* TimestampTz bits; 0 = never */
 } PgConnStatEntry;
 
 typedef struct PgConnStatShared
@@ -155,7 +166,7 @@ pgcs_shmem_startup(void)
 		pgcs->max_entries_warned = false;
 	}
 
-	memset(&info, 0, sizeof(info));
+	MemSet(&info, 0, sizeof(info));
 	info.keysize = sizeof(PgConnStatKey);
 	info.entrysize = sizeof(PgConnStatEntry);
 
@@ -187,25 +198,69 @@ pgcs_build_key(PgConnStatKey *key, const Port *port)
 }
 
 static void
-pgcs_client_authentication(Port *port, int status)
+pgcs_entry_init(PgConnStatEntry *entry)
 {
-	PgConnStatKey key;
+	pg_atomic_init_u64(&entry->n_connections, 0);
+	pg_atomic_init_u64(&entry->n_disconnections, 0);
+	pg_atomic_init_u64(&entry->n_auth_failures, 0);
+	pg_atomic_init_u64(&entry->last_connection_time, 0);
+	pg_atomic_init_u64(&entry->last_disconnection_time, 0);
+}
+
+static void
+pgcs_apply_connect(PgConnStatEntry *entry, int status, TimestampTz now)
+{
+	if (status == STATUS_OK)
+	{
+		pg_atomic_fetch_add_u64(&entry->n_connections, 1);
+		pg_atomic_write_u64(&entry->last_connection_time, (uint64) now);
+	}
+	else
+		pg_atomic_fetch_add_u64(&entry->n_auth_failures, 1);
+}
+
+static void
+pgcs_apply_disconnect(PgConnStatEntry *entry, TimestampTz now)
+{
+	pg_atomic_fetch_add_u64(&entry->n_disconnections, 1);
+	pg_atomic_write_u64(&entry->last_disconnection_time, (uint64) now);
+}
+
+/*
+ * Find-or-create the entry for key and hand it to apply(), taking the cheapest
+ * lock that's safe to do so.
+ *
+ * Fast path (the common case once every (database, user) pair has been seen at
+ * least once): look the entry up under LW_SHARED, which many backends can hold
+ * concurrently, and mutate it with atomic ops while still holding that shared
+ * lock releasing it only after the update would let a concurrent
+ * pg_conn_stat_reset() (which needs LW_EXCLUSIVE to HASH_REMOVE) free the entry
+ * out from under us mid-update, holding LW_SHARED is what prevents that race,
+ * since LW_EXCLUSIVE can't be granted while any shared holder is in.
+ *
+ * Slow path: only reached the first time a given pair is seen, or if a reset
+ * raced the entry away between our shared lookup and getting here.  Needs
+ * LW_EXCLUSIVE to insert, exactly once per distinct pair.
+ */
+static void
+pgcs_record(const PgConnStatKey *key,
+			void (*apply) (PgConnStatEntry *entry, void *arg), void *arg)
+{
 	PgConnStatEntry *entry;
 	bool		found;
-	TimestampTz now;
 
-	if (prev_client_auth_hook)
-		prev_client_auth_hook(port, status);
-
-	if (!pgcs || !pgcs_hash)
+	LWLockAcquire(pgcs->lock, LW_SHARED);
+	entry = (PgConnStatEntry *) hash_search(pgcs_hash, key, HASH_FIND, NULL);
+	if (entry != NULL)
+	{
+		apply(entry, arg);
+		LWLockRelease(pgcs->lock);
 		return;
-
-	pgcs_build_key(&key, port);
-	now = GetCurrentTimestamp();
+	}
+	LWLockRelease(pgcs->lock);
 
 	LWLockAcquire(pgcs->lock, LW_EXCLUSIVE);
-
-	entry = (PgConnStatEntry *) hash_search(pgcs_hash, &key, HASH_ENTER_NULL, &found);
+	entry = (PgConnStatEntry *) hash_search(pgcs_hash, key, HASH_ENTER_NULL, &found);
 	if (entry == NULL)
 	{
 		bool		must_warn = !pgcs->max_entries_warned;
@@ -221,26 +276,52 @@ pgcs_client_authentication(Port *port, int status)
 		return;
 	}
 
+	/* Not an error for found to already be true: another backend may have
+	 * inserted it in the gap between our shared lookup and this exclusive
+	 * acquire. */
 	if (!found)
-	{
-		entry->n_connections = 0;
-		entry->n_disconnections = 0;
-		entry->n_auth_failures = 0;
-		entry->last_connection_time = 0;
-		entry->last_disconnection_time = 0;
-	}
-
-	if (status == STATUS_OK)
-	{
-		entry->n_connections++;
-		entry->last_connection_time = now;
-	}
-	else
-	{
-		entry->n_auth_failures++;
-	}
-
+		pgcs_entry_init(entry);
+	apply(entry, arg);
 	LWLockRelease(pgcs->lock);
+}
+
+struct pgcs_connect_arg
+{
+	int			status;
+	TimestampTz now;
+};
+
+static void
+pgcs_record_connect_cb(PgConnStatEntry *entry, void *arg)
+{
+	struct pgcs_connect_arg *a = (struct pgcs_connect_arg *) arg;
+
+	pgcs_apply_connect(entry, a->status, a->now);
+}
+
+static void
+pgcs_record_disconnect_cb(PgConnStatEntry *entry, void *arg)
+{
+	pgcs_apply_disconnect(entry, *(TimestampTz *) arg);
+}
+
+static void
+pgcs_client_authentication(Port *port, int status)
+{
+	PgConnStatKey key;
+	struct pgcs_connect_arg arg;
+
+	if (prev_client_auth_hook)
+		prev_client_auth_hook(port, status);
+
+	if (!pgcs || !pgcs_hash)
+		return;
+
+	pgcs_build_key(&key, port);
+	arg.status = status;
+	arg.now = GetCurrentTimestamp();
+
+	pgcs_record(&key, pgcs_record_connect_cb, &arg);
 
 	/*
 	 * Only track disconnection for sessions that actually authenticated.
@@ -264,48 +345,15 @@ pgcs_on_disconnect(int code, Datum arg)
 {
 	Port	   *port = MyProcPort;
 	PgConnStatKey key;
-	PgConnStatEntry *entry;
-	bool		found;
+	TimestampTz now;
 
 	if (!pgcs || !pgcs_hash || port == NULL)
 		return;
 
 	pgcs_build_key(&key, port);
+	now = GetCurrentTimestamp();
 
-	LWLockAcquire(pgcs->lock, LW_EXCLUSIVE);
-
-	/*
-	 * HASH_ENTER_NULL rather than HASH_FIND: if a concurrent reset removed
-	 * the entry between connect and disconnect, recreate it instead of
-	 * silently losing this disconnection.
-	 */
-	entry = (PgConnStatEntry *) hash_search(pgcs_hash, &key, HASH_ENTER_NULL, &found);
-	if (entry == NULL)
-	{
-		bool		must_warn = !pgcs->max_entries_warned;
-
-		if (must_warn)
-			pgcs->max_entries_warned = true;
-		LWLockRelease(pgcs->lock);
-		if (must_warn)
-			ereport(WARNING,
-					(errmsg("pg_conn_stat: cannot record disconnection, tracking table is full")));
-		return;
-	}
-
-	if (!found)
-	{
-		entry->n_connections = 0;
-		entry->n_disconnections = 0;
-		entry->n_auth_failures = 0;
-		entry->last_connection_time = 0;
-		entry->last_disconnection_time = 0;
-	}
-
-	entry->n_disconnections++;
-	entry->last_disconnection_time = GetCurrentTimestamp();
-
-	LWLockRelease(pgcs->lock);
+	pgcs_record(&key, pgcs_record_disconnect_cb, &now);
 }
 
 #define PGCS_COLS	7
@@ -336,24 +384,29 @@ pg_conn_stat(PG_FUNCTION_ARGS)
 		Datum		values[PGCS_COLS];
 		bool		nulls[PGCS_COLS];
 		int			i = 0;
+		TimestampTz last_connection_time,
+					last_disconnection_time;
 
-		memset(nulls, 0, sizeof(nulls));
+		MemSet(nulls, 0, sizeof(nulls));
 
 		values[i++] = CStringGetTextDatum(entry->key.datname);
 		values[i++] = CStringGetTextDatum(entry->key.usename);
-		values[i++] = Int64GetDatum(entry->n_connections);
-		values[i++] = Int64GetDatum(entry->n_disconnections);
-		values[i++] = Int64GetDatum(entry->n_auth_failures);
+		values[i++] = Int64GetDatum((int64) pg_atomic_read_u64(&entry->n_connections));
+		values[i++] = Int64GetDatum((int64) pg_atomic_read_u64(&entry->n_disconnections));
+		values[i++] = Int64GetDatum((int64) pg_atomic_read_u64(&entry->n_auth_failures));
 
-		if (entry->last_connection_time == 0)
+		last_connection_time = (TimestampTz) pg_atomic_read_u64(&entry->last_connection_time);
+		last_disconnection_time = (TimestampTz) pg_atomic_read_u64(&entry->last_disconnection_time);
+
+		if (last_connection_time == 0)
 			nulls[i++] = true;
 		else
-			values[i++] = TimestampTzGetDatum(entry->last_connection_time);
+			values[i++] = TimestampTzGetDatum(last_connection_time);
 
-		if (entry->last_disconnection_time == 0)
+		if (last_disconnection_time == 0)
 			nulls[i++] = true;
 		else
-			values[i++] = TimestampTzGetDatum(entry->last_disconnection_time);
+			values[i++] = TimestampTzGetDatum(last_disconnection_time);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
