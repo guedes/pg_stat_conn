@@ -1,0 +1,5 @@
+pgdata/
+extstage/
+results/
+server.log
+*.log
