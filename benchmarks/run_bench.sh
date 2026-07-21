@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compares pg_conn_stat's connection overhead by running pgbench twice
-# (with and without "shared_preload_libraries = pg_conn_stat"), each time
+# Compares pg_stat_conn's connection overhead by running pgbench twice
+# (with and without "shared_preload_libraries = pg_stat_conn"), each time
 # in two modes:
 #   - persistent: connections opened once and reused (pgbench default)
 #   - -C (reconnect): a brand-new connection for every transaction. This is
@@ -67,11 +67,11 @@ run_once() {
 switch_mode() {
 	local mode="$1"
 	if [ "$mode" = "noext" ]; then
-		echo "### Without pg_conn_stat ###"
+		echo "### Without pg_stat_conn ###"
 		set_preload ""
 	else
-		echo "### With pg_conn_stat (shared_preload_libraries) ###"
-		set_preload "pg_conn_stat"
+		echo "### With pg_stat_conn (shared_preload_libraries) ###"
+		set_preload "pg_stat_conn"
 	fi
 	restart_pg
 	sleep 1

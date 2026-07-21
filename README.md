@@ -1,6 +1,6 @@
-# pg_conn_stat
+# pg_stat_conn
 
-`pg_conn_stat` is a lightweight extension for PostgreSQL 15+ that reduces the
+`pg_stat_conn` is a lightweight extension for PostgreSQL 15+ that reduces the
 database's blind spot regarding short-lived connections by tracking the
 cumulative, real-time volume of connections, disconnections, and authentication
 failures isolated per (database, user) pair. By exposing historical data and
@@ -9,15 +9,15 @@ great way to catch applications that abuse reconnections, validate connection
 pooler efficiency, and identify intrusion attempts—all with minimal overhead and
 no need to access server logs.
 
-`pg_conn_stat` counts connections and disconnections per (database, user) pair,
+`pg_stat_conn` counts connections and disconnections per (database, user) pair,
 tracks authentication failures, and records the timestamp of the last connection
-and disconnection. Counters reset with `pg_conn_stat_reset()`, in the same
+and disconnection. Counters reset with `pg_stat_conn_reset()`, in the same
 spirit as `pg_stat_statements_reset()`.
 
 ## Output example
 
 ```
-psql -c "SELECT * FROM pg_conn_stat;"
+psql -c "SELECT * FROM pg_stat_conn;"
 ```
 
 ```shell
@@ -107,7 +107,7 @@ Add the extension to `shared_preload_libraries` in `postgresql.conf` and
 restart the server:
 
 ```
-shared_preload_libraries = 'pg_conn_stat'
+shared_preload_libraries = 'pg_stat_conn'
 ```
 
 ```
@@ -117,7 +117,7 @@ sudo systemctl restart postgresql   # or pg_ctl restart, depending on setup
 Create the extension and generate a few connections:
 
 ```
-psql -c "CREATE EXTENSION pg_conn_stat;"
+psql -c "CREATE EXTENSION pg_stat_conn;"
 psql -c "SELECT 1;"
 psql -c "SELECT 1;"
 ```
@@ -125,7 +125,7 @@ psql -c "SELECT 1;"
 Query the results:
 
 ```
-psql -c "SELECT * FROM pg_conn_stat;"
+psql -c "SELECT * FROM pg_stat_conn;"
 ```
 
 ```
@@ -135,23 +135,44 @@ psql -c "SELECT * FROM pg_conn_stat;"
 ```
 
 The view and both functions are revoked from `PUBLIC`. Querying
-`pg_conn_stat` requires a superuser or a role granted
-`pg_read_all_stats`. Calling `pg_conn_stat_reset()` requires a superuser,
+`pg_stat_conn` requires a superuser or a role granted
+`pg_read_all_stats`. Calling `pg_stat_conn_reset()` requires a superuser,
 or a role that was explicitly granted `EXECUTE` on it.
 
 Reset one pair or everything:
 
 ```
-psql -c "SELECT pg_conn_stat_reset('postgres', 'postgres');"
-psql -c "SELECT pg_conn_stat_reset();"
+psql -c "SELECT pg_stat_conn_reset('postgres', 'postgres');"
+psql -c "SELECT pg_stat_conn_reset();"
 ```
+
+## Storage backend
+
+Two backends are compiled in, selected automatically at build time:
+
+- **PostgreSQL 15–17**: a private, fixed-size shared memory hash table.
+  Counters are reset to zero on every server restart.
+- **PostgreSQL 18+**: PostgreSQL 18's Cumulative Statistics System
+  "custom stats kind" facility
+  (https://wiki.postgresql.org/wiki/CustomCumulativeStats). The table
+  grows dynamically (no fixed limit), and counters survive a clean
+  server restart (not a crash).
+
+  Custom stats kind IDs are a small, global, compile-time resource
+  shared by every extension using this facility on a given server (9
+  IDs total as of PG18). This build defaults to
+  `PGSTAT_KIND_EXPERIMENTAL`, which risks colliding with another
+  extension that does the same. If you reserve a permanent ID on the
+  wiki page above, build with `-DPGSC_STATS_KIND=<reserved id>`.
 
 ## Configuration
 
-`pg_conn_stat.max_entries` (integer, postmaster restart required,
-default 128) sets how many (database, user) pairs are tracked. Pairs
-beyond the limit are not counted. A warning is logged the first time
-the limit is reached, and not repeated after that.
+`pg_stat_conn.max_entries` (integer, postmaster restart required,
+default 128) sets how many (database, user) pairs are tracked on
+**PostgreSQL 15–17 only**. Pairs beyond the limit are not counted. A
+warning is logged the first time the limit is reached, and not
+repeated after that. On PostgreSQL 18+ this setting does not exist;
+the table has no fixed size.
 
 ## Benchmarks
 
@@ -162,7 +183,7 @@ fixed during testing. The scripts used to produce those numbers are in
 
 # License
 
-`pg_conn_stat` is released under the PostgreSQL License.
+`pg_stat_conn` is released under the PostgreSQL License.
 
 Copyright (c) 2026, Dickson S. Guedes
 

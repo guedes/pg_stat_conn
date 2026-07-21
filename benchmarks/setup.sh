@@ -32,16 +32,16 @@ make -C "$EXT_SRC_DIR" USE_PGXS=1 PG_CONFIG="$PG_CONFIG" >/dev/null
 
 echo "==> staging extension_control_path/dynamic_library_path for testing"
 mkdir -p "$EXTSTAGE/extension"
-cp "$EXT_SRC_DIR/pg_conn_stat.so" "$EXTSTAGE/"
-sed "s|module_pathname = '\$libdir/pg_conn_stat'|module_pathname = 'pg_conn_stat'|" \
-	"$EXT_SRC_DIR/pg_conn_stat.control" >"$EXTSTAGE/extension/pg_conn_stat.control"
-cp "$EXT_SRC_DIR/pg_conn_stat--1.0.sql" "$EXTSTAGE/extension/"
+cp "$EXT_SRC_DIR/pg_stat_conn.so" "$EXTSTAGE/"
+sed "s|module_pathname = '\$libdir/pg_stat_conn'|module_pathname = 'pg_stat_conn'|" \
+	"$EXT_SRC_DIR/pg_stat_conn.control" >"$EXTSTAGE/extension/pg_stat_conn.control"
+cp "$EXT_SRC_DIR/pg_stat_conn--1.0.sql" "$EXTSTAGE/extension/"
 
 echo "==> configuring postgresql.conf / pg_hba.conf"
 CONF="$PGDATA/postgresql.conf"
-sed -i '/# pg_conn_stat benchmark overrides/,$d' "$CONF"
+sed -i '/# pg_stat_conn benchmark overrides/,$d' "$CONF"
 cat >>"$CONF" <<EOF
-# pg_conn_stat benchmark overrides
+# pg_stat_conn benchmark overrides
 port = $PGPORT
 listen_addresses = 'localhost'
 unix_socket_directories = '$SCRIPT_DIR'

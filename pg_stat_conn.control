@@ -1,4 +1,4 @@
 comment = 'per (database, user) connection/disconnection statistics'
 default_version = '1.0'
-module_pathname = '$libdir/pg_conn_stat'
+module_pathname = '$libdir/pg_stat_conn'
 relocatable = true

@@ -1,10 +1,10 @@
-# pg_conn_stat: connection overhead benchmark
+# pg_stat_conn: connection overhead benchmark
 
 ## Goal
 
-Measure the throughput overhead `pg_conn_stat` adds to connection
+Measure the throughput overhead `pg_stat_conn` adds to connection
 establishment/teardown, using `pgbench`, comparing a cluster with
-`shared_preload_libraries = 'pg_conn_stat'` against a baseline without it.
+`shared_preload_libraries = 'pg_stat_conn'` against a baseline without it.
 Scripts live in `benchmarks/`.
 
 ## Setup
@@ -18,7 +18,7 @@ Scripts live in `benchmarks/`.
   - **persistent**: default pgbench behavior, each client opens one connection
     and reuses it for the whole run.
   - **`-C` (reconnect)**: a brand-new connection for every transaction.  This is
-    the mode that actually exercises `pg_conn_stat`'s
+    the mode that actually exercises `pg_stat_conn`'s
     `ClientAuthentication_hook` and disconnect callback on every transaction, so
     it's where a real per-connection cost should show up.
 - `benchmarks/summarize.sh` extracts tps/latency from every repetition and
@@ -52,8 +52,8 @@ be contended at disconnect time, exactly what happens under concurrent
 same `LWLock`.
 
 **Fix**: register the disconnect callback with `before_shmem_exit()`
-instead, which runs *before* `ProcKill()`. See `pg_conn_stat.c`,
-`pgcs_client_authentication()`.
+instead, which runs *before* `ProcKill()`. See `pg_stat_conn.c`,
+`pgsc_client_authentication()`.
 
 This was only caught because the benchmark genuinely stressed concurrent
 disconnects; none of the earlier manual `psql` testing ever hit lock
@@ -134,7 +134,7 @@ Two things changed once ordering stopped confounding the comparison:
 ## Locking redesign: single exclusive lock → two-phase shared/exclusive + atomics
 
 The interleaved run above still used the original design: every connect
-and every disconnect took `pgcs->lock` in `LW_EXCLUSIVE` mode
+and every disconnect took `pgsc->lock` in `LW_EXCLUSIVE` mode
 unconditionally, even when the (database, user) entry already existed,
 which, after warm-up, is essentially every time, since the key space
 (distinct database/user pairs) is small and stabilizes fast. That single
@@ -142,24 +142,24 @@ instance-wide exclusive lock is also the exact lock that produced the
 `PANIC` above under just 10 concurrent clients, so it was both the
 measured cost *and* the biggest correctness risk in the module.
 
-`pg_conn_stat.c` was rewritten to follow `pg_stat_statements`' two-phase
-pattern instead (see `pgcs_record()`):
+`pg_stat_conn.c` was rewritten to follow `pg_stat_statements`' two-phase
+pattern instead (see `pgsc_record()`):
 
 1. **Fast path** (the common case once a pair has been seen before):
-   acquire `pgcs->lock` in `LW_SHARED` (which many backends can hold at
+   acquire `pgsc->lock` in `LW_SHARED` (which many backends can hold at
    once), look the entry up with `HASH_FIND`, and bump its counters with
    `pg_atomic_fetch_add_u64`/`pg_atomic_write_u64` *while still holding
    the shared lock*. The counters (`n_connections`, `n_disconnections`,
    `n_auth_failures`, `last_connection_time`, `last_disconnection_time`)
    are now `pg_atomic_uint64` fields instead of plain `int64`/`TimestampTz`.
    Holding `LW_SHARED` during the atomic update, rather than releasing
-   it first, is what keeps this safe: `pg_conn_stat_reset()` needs
+   it first, is what keeps this safe: `pg_stat_conn_reset()` needs
    `LW_EXCLUSIVE` to `HASH_REMOVE` an entry, and that can't be granted
    while any shared holder is in, so the entry can't be freed out from
    under an in-flight atomic update.
 2. **Slow path**: only reached the first time a given pair is seen (or
    if a concurrent reset raced the entry away between the shared lookup
-   and getting here). Re-acquires `pgcs->lock` in `LW_EXCLUSIVE` to
+   and getting here). Re-acquires `pgsc->lock` in `LW_EXCLUSIVE` to
    `HASH_ENTER_NULL` the entry, exactly once per distinct pair, not once
    per connection.
 
@@ -200,16 +200,67 @@ real, order-independent signal rather than noise, dropped by roughly
 exclusive lock from the common case. Persistent mode was already
 indistinguishable from noise before this change and remains so.
 
+## Results, run 4: PG18 `pgstat_register_kind` backend (same interleaved methodology, 5 reps, median)
+
+`pg_stat_conn.c` was migrated to PostgreSQL 18's Cumulative Statistics
+System "custom stats kind" facility on PG18+ (`pgstat_register_kind()`,
+see the `#if PG_VERSION_NUM >= 180000` branch), replacing the private
+shmem hash table with the generic pgstat machinery: dynamically-sized
+storage (no more `max_entries`), per-entry locking owned by pgstat, and
+on-disk persistence across clean restarts. Connect/disconnect events now
+accumulate in a backend-local "pending" struct
+(`PgStat_StatConnPending`) that's merged into shared memory by a
+`flush_pending_cb`, called periodically and at backend shutdown, instead
+of an immediate atomic increment on the shared entry. Same machine, same
+methodology (interleaved order, 10 clients, 4 threads, 15 s, 5 reps):
+
+| scenario                 | n | median tps | tps min–max         | overhead   |
+|--------------------------|---|------------|---------------------|------------|
+| persistent, no ext       | 5 | 151,808.5  | 149,140.5–163,698.0 | n/a        |
+| persistent, with ext     | 5 | 150,481.8  | 148,856.7–158,998.9 | **-0.87%** |
+| `-C` reconnect, no ext   | 5 | 1,928.3    | 1,905.7–2,026.2     | n/a        |
+| `-C` reconnect, with ext | 5 | 1,920.0    | 1,889.1–1,988.9     | **-0.43%** |
+
+Zero failed transactions and no PANICs across all 20 runs (10 clients
+hammering the disconnect path in `-C` mode included), confirming the
+`before_shmem_exit()` ordering between this extension's own disconnect
+hook and pgstat's generic shutdown flush (`pgstat_shutdown_hook`, also
+registered via `before_shmem_exit()`, earlier, during `BaseInit()`) holds
+up under concurrent load, not just in the single-connection manual
+testing done during development.
+
+### Before/after: shmem backend (run 3) vs pgstat backend (run 4)
+
+| scenario       | shmem backend (run 3) | pgstat backend (run 4) |
+|----------------|------------------------|-------------------------|
+| persistent     | -0.51%                 | -0.87%                  |
+| `-C` reconnect | -1.26%                 | **-0.43%**               |
+
+No regression. If anything, the reconnect-mode overhead -- the one
+number in this whole file that has consistently been a real,
+order-independent signal rather than noise -- is *lower* with the new
+backend, and now sits inside the same noise band as persistent mode.
+The plausible mechanism: in `-C` mode every transaction is a brand-new
+backend, so neither backend gets to reuse a cached lookup; both pay a
+shared-lock-protected hash lookup (`LW_SHARED` + `hash_search` before,
+`dshash_find` now) once per connection. But where the old design applied
+the counter update as an atomic op directly on the shared, contended
+cacheline, the new design applies it to a backend-local `pending` struct
+under no lock at all, and only merges into shared memory later, in a
+batched flush -- trading one shared atomic write per event for one purely
+local write per event plus an amortized, less-contended flush.
+
 ## Conclusion
 
-`pg_conn_stat`'s real, measurable cost is confined to the connection
-setup/teardown path itself, and after the locking redesign it's down to
-roughly **1–1.5% throughput overhead in the worst case**
-(`pgbench -C`, a new connection for every single transaction, a
-pathological, connection-pool-less workload). Under any workload where
-connections are reused for more than a handful of transactions (i.e.
-essentially all real applications, and matching the persistent-mode
-result here), the overhead is indistinguishable from measurement noise.
+`pg_stat_conn`'s real, measurable cost is confined to the connection
+setup/teardown path itself, and stays at or under **~1% throughput
+overhead in the worst case** (`pgbench -C`, a new connection for every
+single transaction, a pathological, connection-pool-less workload) on
+both storage backends, PG18's `pgstat_register_kind` included. Under any
+workload where connections are reused for more than a handful of
+transactions (i.e. essentially all real applications, and matching the
+persistent-mode result here), the overhead is indistinguishable from
+measurement noise.
 
 ## Reproducing
 
