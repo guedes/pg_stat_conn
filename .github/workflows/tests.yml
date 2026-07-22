@@ -27,7 +27,8 @@ jobs:
           sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
-            libkrb5-dev
+            libkrb5-dev \
+            libipc-run-perl
 
       - name: Build and install pg_stat_conn
         run: |
