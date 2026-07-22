@@ -18,6 +18,7 @@ REVOKE ALL ON FUNCTION pg_stat_conn() FROM PUBLIC;
 CREATE VIEW pg_stat_conn AS
     SELECT * FROM pg_stat_conn();
 
+GRANT EXECUTE ON FUNCTION pg_stat_conn() TO pg_read_all_stats;
 GRANT SELECT ON pg_stat_conn TO pg_read_all_stats;
 
 CREATE FUNCTION pg_stat_conn_reset(

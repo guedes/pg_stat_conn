@@ -146,6 +146,21 @@ psql -c "SELECT pg_stat_conn_reset('postgres', 'postgres');"
 psql -c "SELECT pg_stat_conn_reset();"
 ```
 
+## Running the tests
+
+The `t/` directory has TAP tests (`PostgreSQL::Test::Cluster`), the
+same style used by `pg_stat_statements` and other modules that require
+`shared_preload_libraries`: each test spins up its own temporary
+cluster with `pg_stat_conn` preloaded, so a plain `pg_regress` run
+against a general-purpose server cannot exercise it. They need a
+PostgreSQL build with `--enable-tap-tests` (the case for most
+distribution packages, including PGDG's).
+
+```
+make USE_PGXS=1 PG_CONFIG=/path/to/pg_config install
+make USE_PGXS=1 PG_CONFIG=/path/to/pg_config installcheck
+```
+
 ## Storage backend
 
 Two backends are compiled in, selected automatically at build time:

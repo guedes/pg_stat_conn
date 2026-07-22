@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} (PGDG) with TAP test support
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }}
+
+      - name: Build and install pg_stat_conn
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          make USE_PGXS=1 PG_CONFIG=$PG_CONFIG
+          sudo make USE_PGXS=1 PG_CONFIG=$PG_CONFIG install
+
+      - name: Run tests
+        run: |
+          # initdb refuses to run as root, so installcheck (which starts
+          # its own temporary cluster per test) must run as the normal
+          # runner user, unlike the "make install" step above.
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          make USE_PGXS=1 PG_CONFIG=$PG_CONFIG installcheck
+
+      - name: Show test logs on failure
+        if: failure()
+        run: |
+          for f in tmp_check/log/regress_log_* tmp_check/log/*.log; do
+            [ -f "$f" ] || continue
+            echo "==== $f ===="
+            cat "$f"
+          done
