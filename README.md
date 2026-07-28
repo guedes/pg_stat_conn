@@ -38,13 +38,18 @@ psql -c "SELECT * FROM pg_stat_conn;"
 
 Where:
 
-- `datname`: the database name to which the connection belongs, even non‑existent databases appear here, useful for detecting connection attempts to unknown databases.
-- `usename`: the username that established the connection, usernames that do not exist in the cluster can also be listed, helping spot unauthorized or mistyped login attempts.
+- `datname`: the database name to which the connection belongs
+  - even non‑existent databases appear here, useful for detecting connection
+    attempts to unknown databases.
+- `usename`: the username that established the connection
+  - usernames that do not exist in the cluster can also be listed, helping spot
+    unauthorized or mistyped login attempts.
 - `n_connections`: total number of successful connection attempts recorded.
 - `n_disconnections`: total number of recorded session terminations.
 - `n_auth_failures`: count of authentication failures for that user/database.
 - `last_connection_time`: timestamp of the most recent successful connection.
-- `last_disconnection_time`: timestamp of the most recent recorded disconnection.
+- `last_disconnection_time`: timestamp of the most recent recorded
+  disconnection.
 
 
 ## Why track this
@@ -172,15 +177,7 @@ Two backends are compiled in, selected automatically at build time:
 - **PostgreSQL 18+**: PostgreSQL 18's Cumulative Statistics System
   "custom stats kind" facility
   (https://wiki.postgresql.org/wiki/CustomCumulativeStats). The table
-  grows dynamically (no fixed limit), and counters survive a clean
-  server restart (not a crash).
-
-  Custom stats kind IDs are a small, global, compile-time resource
-  shared by every extension using this facility on a given server (9
-  IDs total as of PG18). This build defaults to
-  `PGSTAT_KIND_EXPERIMENTAL`, which risks colliding with another
-  extension that does the same. If you reserve a permanent ID on the
-  wiki page above, build with `-DPGSC_STATS_KIND=<reserved id>`.
+  grows dynamically (no fixed limit), and counters survive a clean.
 
 ## Configuration
 
