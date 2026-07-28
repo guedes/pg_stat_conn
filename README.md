@@ -1,5 +1,7 @@
 # pg_stat_conn
 
+[![tests](https://github.com/guedes/pg_stat_conn/actions/workflows/tests.yml/badge.svg)](https://github.com/guedes/pg_stat_conn/actions/workflows/tests.yml)
+
 `pg_stat_conn` is a lightweight extension for PostgreSQL 15+ that reduces the
 database's blind spot regarding short-lived connections by tracking the
 cumulative, real-time volume of connections, disconnections, and authentication
