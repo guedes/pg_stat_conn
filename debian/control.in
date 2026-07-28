@@ -1,0 +1,25 @@
+Source: pg-stat-conn
+Section: database
+Priority: optional
+Maintainer: Dickson S. Guedes <guedes@guedesoft.net>
+Standards-Version: 4.7.4
+Build-Depends:
+ debhelper-compat (= 13),
+ postgresql-server-dev-all,
+Homepage: https://github.com/guedes/pg_stat_conn
+Vcs-Browser: https://github.com/guedes/pg_stat_conn
+Vcs-Git: https://github.com/guedes/pg_stat_conn.git
+
+Package: postgresql-PGVERSION-pg-stat-conn
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${postgresql:Depends},
+ ${shlibs:Depends},
+Breaks:
+ ${postgresql:Breaks},
+Description: per (database, user) connection/disconnection statistics
+ pg_stat_conn tracks the cumulative, real-time volume of connections,
+ disconnections, and authentication failures isolated per (database, user)
+ pair, exposing historical data and allowing granular counter resets in the
+ same spirit as pg_stat_statements.

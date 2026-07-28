@@ -71,8 +71,61 @@ jobs:
           path: pg_stat_conn-*-pg${{ matrix.pg }}-linux-amd64.tar.gz
           if-no-files-found: error
 
+  build-deb:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL (PGDG) and Debian packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y \
+            dpkg-dev \
+            debhelper \
+            devscripts \
+            postgresql-common \
+            postgresql-server-dev-15 \
+            postgresql-server-dev-16 \
+            postgresql-server-dev-17 \
+            postgresql-server-dev-18 \
+            libkrb5-dev
+
+      - name: Generate debian/changelog for this release
+        env:
+          TAG: ${{ github.ref_name }}
+          DEBEMAIL: guedes@guedesoft.net
+          DEBFULLNAME: Dickson S. Guedes
+          EDITOR: /bin/true
+        run: |
+          VERSION="${TAG#v}"
+          dch --create --package pg-stat-conn -v "$VERSION" \
+            --distribution unstable -u low \
+            "Release ${TAG}."
+
+      - name: Build Debian packages (all supported PG versions)
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect packages
+        run: |
+          mkdir -p dist
+          mv ../*.deb dist/
+
+      - name: Upload Debian package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_stat_conn-deb-packages
+          path: dist/*.deb
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, build-deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -86,5 +139,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
           generate_release_notes: true
