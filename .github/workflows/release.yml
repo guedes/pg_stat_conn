@@ -74,19 +74,24 @@ jobs:
   build-deb:
     needs: test
     runs-on: ubuntu-latest
+    # Build against Debian bookworm's glibc (2.36) instead of the runner's
+    # newer glibc, so the resulting .deb also installs on older glibc targets
+    # (glibc is forward-compatible: bookworm-built binaries run fine on newer
+    # Debian/Ubuntu releases too).
+    container: debian:bookworm
     steps:
       - uses: actions/checkout@v4
 
       - name: Install PostgreSQL (PGDG) and Debian packaging tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl ca-certificates
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+          apt-get update
+          apt-get install -y curl ca-certificates gnupg lsb-release
+          install -d /usr/share/postgresql-common/pgdg
+          curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          sudo apt-get update
-          sudo apt-get install -y \
+          sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          apt-get update
+          apt-get install -y \
             build-essential \
             dpkg-dev \
             debhelper \
