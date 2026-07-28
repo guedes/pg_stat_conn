@@ -109,6 +109,9 @@ jobs:
             --distribution unstable -u low \
             "Release ${TAG}."
 
+      - name: Generate debian/control from control.in
+        run: pg_buildext updatecontrol
+
       - name: Build Debian packages (all supported PG versions)
         run: dpkg-buildpackage -us -uc -b
 
